@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Stem Splitter — macOS desktop app for splitting audio into stems using Demucs.
+Stem Splitter — cross-platform desktop app for splitting audio into stems using Demucs.
 
-Requirements:
-    brew install ffmpeg
-    pip install demucs torchcodec
+macOS:   brew install ffmpeg && pip install demucs torchcodec
+Windows: use Stem Splitter.bat (handles everything automatically)
 """
 
 import os
+import re
 import sys
 import shutil
 import tempfile
@@ -23,13 +23,14 @@ from tkinter import ttk, filedialog, messagebox
 
 STEMS = ["vocals", "drums", "bass", "other"]
 OUTPUT_BASE = Path.home() / "stems_output"
+MONO_FONT  = "Consolas" if sys.platform == "win32" else "Menlo"
 
 QUALITY_PRESETS = {
-    "Best  — htdemucs_ft, shifts 10  (slow)":     {"model": "htdemucs_ft", "shifts": 10, "overlap": 0.5},
-    "Balanced  — htdemucs_ft, shifts 5  (medium)": {"model": "htdemucs_ft", "shifts": 5,  "overlap": 0.25},
-    "Preview  — htdemucs, shifts 1  (fast)":        {"model": "htdemucs",    "shifts": 1,  "overlap": 0.25},
+    "Best  — htdemucs_ft, shifts 10  (slow)":      {"model": "htdemucs_ft", "shifts": 10, "overlap": 0.5},
+    "Balanced  — htdemucs_ft, shifts 5  (medium)":  {"model": "htdemucs_ft", "shifts": 5,  "overlap": 0.25},
+    "Preview  — htdemucs, shifts 1  (fast)":         {"model": "htdemucs",    "shifts": 1,  "overlap": 0.25},
 }
-DEFAULT_QUALITY = next(iter(QUALITY_PRESETS))  # first entry = Best
+DEFAULT_QUALITY = next(iter(QUALITY_PRESETS))
 
 
 class App:
@@ -83,12 +84,11 @@ class App:
         quality_frame.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(0, 10))
 
         self.quality_var = tk.StringVar(value=DEFAULT_QUALITY)
-        quality_box = ttk.Combobox(
+        ttk.Combobox(
             quality_frame, textvariable=self.quality_var,
             values=list(QUALITY_PRESETS.keys()),
             state="readonly", width=52,
-        )
-        quality_box.grid(sticky="w")
+        ).grid(sticky="w")
 
         # Options
         opt_frame = ttk.LabelFrame(f, text="Options", padding=(10, 8))
@@ -102,22 +102,52 @@ class App:
 
         # Run button
         self.btn_run = ttk.Button(f, text="▶  Split Stems", command=self._start)
-        self.btn_run.grid(row=5, column=0, columnspan=4, pady=10)
+        self.btn_run.grid(row=5, column=0, columnspan=4, pady=(2, 10))
+
+        # ── Progress ──────────────────────────────────────────────────────────
+        prog_frame = ttk.LabelFrame(f, text="Progress", padding=(14, 10))
+        prog_frame.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(0, 10))
+        prog_frame.columnconfigure(1, weight=1)
+
+        # Step label
+        self.lbl_step = ttk.Label(prog_frame, text="Idle", foreground="gray",
+                                  font=("Helvetica", 11))
+        self.lbl_step.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
+
+        # Current pass bar
+        ttk.Label(prog_frame, text="Current pass", width=13,
+                  font=("Helvetica", 10)).grid(row=1, column=0, sticky="w")
+        self.bar_current = ttk.Progressbar(prog_frame, length=360,
+                                           mode="determinate", maximum=100)
+        self.bar_current.grid(row=1, column=1, padx=(8, 8), sticky="ew")
+        self.lbl_pct_current = ttk.Label(prog_frame, text="  0%", width=5,
+                                         font=("Helvetica", 10, "bold"))
+        self.lbl_pct_current.grid(row=1, column=2)
+
+        # Overall bar
+        ttk.Label(prog_frame, text="Overall", width=13,
+                  font=("Helvetica", 10)).grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.bar_overall = ttk.Progressbar(prog_frame, length=360,
+                                           mode="determinate", maximum=100)
+        self.bar_overall.grid(row=2, column=1, padx=(8, 8), sticky="ew", pady=(8, 0))
+        self.lbl_pct_overall = ttk.Label(prog_frame, text="  0%", width=5,
+                                         font=("Helvetica", 10, "bold"))
+        self.lbl_pct_overall.grid(row=2, column=2, pady=(8, 0))
 
         # Status log
-        log_frame = ttk.LabelFrame(f, text="Status", padding=(10, 8))
-        log_frame.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(0, 6))
+        log_frame = ttk.LabelFrame(f, text="Log", padding=(10, 8))
+        log_frame.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(0, 6))
 
         self.log_box = tk.Text(
-            log_frame, height=9, width=60, state="disabled",
-            wrap="word", font=("Menlo", 11),
+            log_frame, height=7, width=60, state="disabled",
+            wrap="word", font=(MONO_FONT, 10),
             bg="#1c1c1e", fg="#e5e5ea", relief="flat",
         )
         self.log_box.grid()
 
-        # Elapsed time label
+        # Elapsed time
         self.lbl_time = ttk.Label(f, text="", foreground="gray")
-        self.lbl_time.grid(row=7, column=0, columnspan=4)
+        self.lbl_time.grid(row=8, column=0, columnspan=4)
 
     # ── Checkbox helpers ──────────────────────────────────────────────────────
 
@@ -156,6 +186,7 @@ class App:
             return
         self._clear_log()
         self.lbl_time.config(text="")
+        self._reset_progress("Starting…")
         self._ui_lock(True)
         preset = QUALITY_PRESETS[self.quality_var.get()]
         threading.Thread(target=self._process, args=(want, preset), daemon=True).start()
@@ -171,10 +202,12 @@ class App:
 
             self._log("Loading file…")
 
-            model = preset["model"]
+            model  = preset["model"]
             shifts = preset["shifts"]
-            self._log(f"Separating stems — model: {model}, shifts: {shifts}  (this may take a while)…")
+            self._log(f"Separating — model: {model}, shifts: {shifts}…")
             self._run_demucs(tmp, preset)
+
+            self._set_progress("Saving output…", 100, 100)
 
             self._log("Filtering selected stems…")
             song_dir = self._find_song_dir(tmp, model)
@@ -195,23 +228,31 @@ class App:
 
             elapsed = time.time() - t0
             self._log(f"\nDone.  Saved to:\n  {out_dir}")
+            self._set_progress("Done.", 100, 100)
             self.root.after(0, lambda: self.lbl_time.config(text=f"Completed in {elapsed:.1f}s"))
-            subprocess.run(["open", str(out_dir)])
+            _open_folder(out_dir)
 
         except EnvironmentError as e:
             self._log(f"\n⛔  {e}")
+            self._set_progress("Error.", 0, 0)
         except FileNotFoundError as e:
             self._log(f"\n⛔  Output not found: {e}")
+            self._set_progress("Error.", 0, 0)
         except subprocess.CalledProcessError:
-            self._log("\n⛔  Demucs failed. See output above for details.")
+            self._log("\n⛔  Demucs failed. See log above for details.")
+            self._set_progress("Error.", 0, 0)
         except Exception as e:
             self._log(f"\n⛔  Unexpected error: {e}")
+            self._set_progress("Error.", 0, 0)
         finally:
             self.root.after(0, lambda: self._ui_lock(False))
 
+    # ── Demucs ────────────────────────────────────────────────────────────────
+
     def _subprocess_env(self):
         env = os.environ.copy()
-        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + env.get("PATH", "")
+        if sys.platform == "darwin":
+            env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + env.get("PATH", "")
         try:
             import certifi
             ca = certifi.where()
@@ -231,6 +272,11 @@ class App:
             raise EnvironmentError("ffmpeg not installed.\n  Fix: brew install ffmpeg")
 
     def _run_demucs(self, tmp: Path, preset: dict):
+        total_passes = preset["shifts"]
+        completed_passes = 0
+        last_was_high = False
+        is_downloading = False
+
         cmd = [
             sys.executable, "-m", "demucs",
             "--name",    preset["model"],
@@ -245,12 +291,43 @@ class App:
         )
         all_lines = []
         for line in proc.stdout:
-            line = line.strip()
-            if not line:
+            stripped = line.strip()
+            if not stripped:
                 continue
-            all_lines.append(line)
-            if any(k in line for k in ("%|", "Separating", "Downloading", "segment", "Model")):
-                self._log(f"  {line}")
+            all_lines.append(stripped)
+
+            # Detect phase
+            if "Downloading:" in stripped:
+                is_downloading = True
+            elif "Separating track" in stripped:
+                is_downloading = False
+                self._log(f"  {stripped}")
+
+            # Parse tqdm percentage
+            m = re.search(r'^\s*(\d+)%\|', stripped)
+            if m:
+                pct = int(m.group(1))
+
+                if is_downloading:
+                    self._set_progress(f"Downloading model…", pct, 0)
+
+                else:
+                    # Detect pass rollover (high% → low%)
+                    if last_was_high and pct < 5:
+                        completed_passes += 1
+                    last_was_high = pct > 80
+
+                    overall = min(99, int((completed_passes + pct / 100) / total_passes * 100))
+                    label = f"Separating — pass {completed_passes + 1} of {total_passes}"
+                    self._set_progress(label, pct, overall)
+
+                # Show progress lines in log (skip noisy intermediate lines)
+                if pct % 25 == 0 or pct == 100:
+                    self._log(f"  {stripped}")
+
+            elif any(k in stripped for k in ("Separated", "Model", "Selected model")):
+                self._log(f"  {stripped}")
+
         proc.wait()
         if proc.returncode != 0:
             self._log("\n  Demucs output:")
@@ -259,7 +336,6 @@ class App:
             raise subprocess.CalledProcessError(proc.returncode, cmd)
 
     def _find_song_dir(self, tmp: Path, model: str) -> Path:
-        """Find the song output folder — searches by model name then falls back to any folder."""
         for search_dir in [tmp / model, tmp]:
             if not search_dir.exists():
                 continue
@@ -268,7 +344,22 @@ class App:
                 return max(dirs, key=lambda d: d.stat().st_mtime)
         raise FileNotFoundError(f"No Demucs output found in {tmp}")
 
-    # ── UI helpers ────────────────────────────────────────────────────────────
+    # ── Progress helpers (thread-safe) ────────────────────────────────────────
+
+    def _set_progress(self, label: str, current_pct: int, overall_pct: int):
+        def _update():
+            self.lbl_step.config(text=label, foreground="black")
+            self.bar_current["value"] = current_pct
+            self.lbl_pct_current.config(text=f"{current_pct:3d}%")
+            self.bar_overall["value"] = overall_pct
+            self.lbl_pct_overall.config(text=f"{overall_pct:3d}%")
+        self.root.after(0, _update)
+
+    def _reset_progress(self, label: str = "Idle"):
+        self._set_progress(label, 0, 0)
+        self.root.after(0, lambda: self.lbl_step.config(foreground="gray"))
+
+    # ── Log helpers ───────────────────────────────────────────────────────────
 
     def _log(self, msg: str):
         self.root.after(0, lambda m=msg: self._append_log(m))
@@ -284,10 +375,21 @@ class App:
         self.log_box.delete("1.0", "end")
         self.log_box.config(state="disabled")
 
+    # ── UI lock ───────────────────────────────────────────────────────────────
+
     def _ui_lock(self, locked: bool):
         state = "disabled" if locked else "normal"
         self.btn_file.config(state=state)
         self.btn_run.config(state=state)
+
+
+def _open_folder(path: Path):
+    if sys.platform == "win32":
+        os.startfile(path)
+    elif sys.platform == "darwin":
+        subprocess.run(["open", str(path)])
+    else:
+        subprocess.run(["xdg-open", str(path)])
 
 
 def main():
